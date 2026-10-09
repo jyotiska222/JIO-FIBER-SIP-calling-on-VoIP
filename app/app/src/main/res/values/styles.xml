@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="AppTheme" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#0E1014</item>
+        <item name="android:colorBackground">#0E1014</item>
+        <item name="android:statusBarColor">#0E1014</item>
+        <item name="android:navigationBarColor">#0E1014</item>
+        <item name="android:colorPrimary">#3D7BFF</item>
+        <item name="android:colorAccent">#3D7BFF</item>
+        <item name="android:textColorPrimary">#F1F3F7</item>
+        <item name="android:textColorSecondary">#9BA3B1</item>
+        <item name="android:alertDialogTheme">@style/AppDialog</item>
+    </style>
+
+    <style name="AppDialog" parent="android:Theme.Material.Dialog.Alert">
+        <item name="android:colorBackground">#222733</item>
+        <item name="android:textColorPrimary">#F1F3F7</item>
+        <item name="android:textColorSecondary">#9BA3B1</item>
+        <item name="android:colorAccent">#3D7BFF</item>
+    </style>
+
+    <style name="AppTheme.InCall">
+        <item name="android:windowBackground">#0B0D12</item>
+        <item name="android:statusBarColor">#0B0D12</item>
+        <item name="android:navigationBarColor">#0B0D12</item>
+    </style>
+</resources>

@@ -1,0 +1,18 @@
+# build output / caches
+.gradle/
+build/
+app/build/
+native/.work/
+*.apk
+*.aab
+*.so
+
+# machine-specific and secret files: never commit these
+local.properties
+keystore.properties
+*.jks
+*.keystore
+*.pem
+*.key
+.idea/
+*.iml
