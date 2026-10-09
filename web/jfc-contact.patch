@@ -1,0 +1,96 @@
+diff -ruN a/pjlib/include/pj/ctype.h b/pjlib/include/pj/ctype.h
+--- a/pjlib/include/pj/ctype.h
++++ b/pjlib/include/pj/ctype.h
+@@ -140,6 +140,12 @@
+ #define pj_hex_digits   "0123456789abcdef"
+ 
+ /**
++ * Array of hex digits, in upperspace.
++ */
++ /*extern char pj_hex_digits_capital[];*/
++#define pj_hex_digits_capital "0123456789ABCDEF"
++
++/**
+  * Convert a value to hex representation.
+  * @param value     Integral value to convert.
+  * @param p         Buffer to hold the hex representation, which must be
+@@ -152,6 +158,18 @@
+ }
+ 
+ /**
++ * Convert a value to hex representation.
++ * @param value     Integral value to convert.
++ * @param p         Buffer to hold the hex representation, which must be
++ *                  at least two bytes length.
++ */
++PJ_INLINE(void) pj_val_to_hex_digit_capital(unsigned value, char* p)
++{
++    *p++ = pj_hex_digits_capital[(value & 0xF0) >> 4];
++    *p = pj_hex_digits_capital[(value & 0x0F)];
++}
++
++/**
+  * Convert hex digit c to integral value.
+  * @param c     The hex digit character.
+  * @return      The integral value between 0 and 15.
+diff -ruN a/pjsip/src/pjsua-lib/pjsua_acc.c b/pjsip/src/pjsua-lib/pjsua_acc.c
+--- a/pjsip/src/pjsua-lib/pjsua_acc.c
++++ b/pjsip/src/pjsua-lib/pjsua_acc.c
+@@ -173,15 +173,15 @@
+         const pj_str_t *hostname;
+         pj_uint32_t hval;
+         pj_size_t pos;
+-        char instprm[] = ";+sip.instance=\"<urn:uuid:00000000-0000-0000-0000-0000CCDDEEFF>\"";
++        char instprm[] = ";+sip.instance=\"<00000000-0000-1000-8000-0000CCDDEEFF>\"";
+ 
+         hostname = pj_gethostname();
+         pos = pj_ansi_strlen(instprm) - 10;
+         hval = pj_hash_calc(0, hostname->ptr, (unsigned)hostname->slen);
+-        pj_val_to_hex_digit(((char*)&hval)[0], instprm + pos + 0);
+-        pj_val_to_hex_digit(((char*)&hval)[1], instprm + pos + 2);
+-        pj_val_to_hex_digit(((char*)&hval)[2], instprm + pos + 4);
+-        pj_val_to_hex_digit(((char*)&hval)[3], instprm + pos + 6);
++        pj_val_to_hex_digit_capital(((char*)&hval)[0], instprm + pos + 0);
++        pj_val_to_hex_digit_capital(((char*)&hval)[1], instprm + pos + 2);
++        pj_val_to_hex_digit_capital(((char*)&hval)[2], instprm + pos + 4);
++        pj_val_to_hex_digit_capital(((char*)&hval)[3], instprm + pos + 6);
+ 
+         pj_strdup2(acc->pool, &acc->rfc5626_instprm, instprm);
+     } else {
+@@ -1670,8 +1670,7 @@
+               acc->cfg.contact_params.slen +
+               acc->cfg.reg_contact_params.slen +
+               acc->cfg.reg_contact_uri_params.slen +
+-              (need_outbound?
+-               (acc->rfc5626_instprm.slen + acc->rfc5626_regprm.slen): 0) +
++              (need_outbound? acc->rfc5626_regprm.slen: 0) +
+               5; /* allowance */
+         if (len > acc->contact.slen) {
+             reg_contact.ptr = (char*) pj_pool_alloc(acc->pool, len);
+@@ -1723,7 +1722,6 @@
+                  * +sip.instance and reg-id parameters.
+                  */
+                 pj_strcat(&reg_contact, &acc->rfc5626_regprm);
+-                pj_strcat(&reg_contact, &acc->rfc5626_instprm);
+             } else {
+                 acc->rfc5626_status = OUTBOUND_NA;
+             }
+@@ -3835,6 +3833,18 @@
+         transport_param[0] = '\0';
+     }
+ 
++    if (acc->cfg.use_rfc5626) {
++        pj_ssize_t new_len;
++        pj_str_t new_prm;
++
++        new_len = acc->cfg.contact_params.slen + acc->rfc5626_instprm.slen;
++
++        new_prm.ptr = (char*)pj_pool_alloc(acc->pool, new_len);
++
++        pj_strcpy(&new_prm, &(acc->cfg.contact_params));
++        pj_strcat(&new_prm, &(acc->rfc5626_instprm));
++        acc->cfg.contact_params = new_prm;
++    }
+ 
+     /* Create the contact header */
+     contact->ptr = (char*)pj_pool_alloc(pool, PJSIP_MAX_URL_SIZE);

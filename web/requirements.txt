@@ -1,0 +1,8 @@
+# Python packages needed: none.
+# server.py and sip/jio-sip-client use only the Python standard library (Python 3.8+).
+#
+# Only needed for real calls (mode "pjsua" in sip/config.json), and NOT installable with pip:
+#   pjsua  (command-line SIP client from pjproject) -> install with your OS package manager
+#   see setup.sh
+
+# sudo apt install openssl

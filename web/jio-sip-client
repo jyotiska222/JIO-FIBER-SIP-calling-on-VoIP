@@ -1,0 +1,562 @@
+#!/usr/bin/env python3
+"""
+jio-sip-client  --  the ONLY place that knows about SIP / Jio.
+
+Usage:  jio-sip-client call <number> [--audio browser|file|mock]
+        jio-sip-client listen        [--audio ...]   (stay registered, wait for INCOMING calls)
+
+Contract with server.py
+  stdout : lines "STATE: <calling|ringing|in-call|on-hold|standby|ended|error>" update the web page.
+           "INCOMING: <caller number>" is printed when somebody calls us (listen mode).
+  stdin  : one command per line:
+           dtmf <digits> | hold | unhold | transfer <number> | answer | decline | endcall | hangup
+           (listen mode: endcall/decline only end the CALL and keep the line registered;
+            hangup / SIGTERM shut the whole client down)
+  SIGTERM: hang up cleanly (BYE + unregister) and exit. Never lingers: every timer/thread
+           is a daemon, and pjsua is force-killed if it does not quit in a few seconds.
+
+Audio (--audio)
+  browser : live audio. server.py wires pjsua's microphone/speaker to the browser through
+            virtual PulseAudio devices (selected with PULSE_SOURCE / PULSE_SINK env vars).
+  file    : old behaviour - no sound card, plays config.json -> pjsua.play_file to the callee.
+  mock    : pretends to call (no SIP at all).
+"""
+import json, os, re, signal, subprocess, sys, threading, time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+CONFIG = HERE / "config.json"
+
+DEFAULT_CONFIG = {
+    "mode": "mock",
+    "pjsua": {
+        "binary": "pjsua",
+        # --- FILL THESE FROM YOUR JFC / router provisioning data (never share them) ---
+        "id": "sip:PRIVATE_IDENTITY@ims.example",
+        "registrar": "sip:ROUTER_LOCAL_PROXY:5068",
+        "proxy": "sip:ROUTER_LOCAL_PROXY:5068;transport=tls",
+        "realm": "*",
+        "username": "USERNAME",
+        "password": "PASSWORD",
+        "domain_for_calls": "ims.example",
+        "use_tls": True,
+        "number_prefix": "0",
+        "user_phone": True,
+        "audio": "browser",                             # "browser" (live mic) or "file" (test.wav)
+        "play_file": str(HERE / "test.wav"),            # only used when audio = "file"
+        "max_seconds": 30,                              # only used when audio = "file"
+        "max_call_seconds": 0,                          # live calls: 0 = no limit
+    },
+}
+
+
+def load_config():
+    if not CONFIG.exists():
+        CONFIG.write_text(json.dumps(DEFAULT_CONFIG, indent=2))
+        print(f"Created {CONFIG} (mode=mock). Edit it to use a real SIP backend.", flush=True)
+    return json.loads(CONFIG.read_text())
+
+
+_say_lock = threading.Lock()
+
+
+def say(msg):
+    """One atomic write per line: several threads print here (log reader, hold/answer watchers...)."""
+    with _say_lock:
+        sys.stdout.write(str(msg) + "\n")
+        sys.stdout.flush()
+
+
+def read_commands(handler):
+    """Daemon thread: feed lines from stdin (server.py) to handler(cmd, arg)."""
+    def loop():
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            cmd, _, arg = line.partition(" ")
+            try:
+                handler(cmd.lower(), arg.strip())
+            except Exception as e:
+                say(f"[client] command '{cmd}' failed: {e}")
+    threading.Thread(target=loop, daemon=True).start()
+
+
+def build_uri(number, c):
+    dialed = number.lstrip("+")
+    if len(dialed) == 10:                       # 10-digit mobile -> add prefix
+        dialed = c.get("number_prefix", "") + dialed
+    uri = f"sip:{dialed}@{c['domain_for_calls']}"
+    if c.get("user_phone", False):
+        uri += ";user=phone"
+    return uri
+
+
+# --------------------------------------------------------------------------- mock
+def run_mock(number):
+    stop = threading.Event()
+    held = {"v": False}
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
+
+    def on_cmd(cmd, arg):
+        if cmd == "hangup":
+            stop.set()
+        elif cmd == "hold":
+            held["v"] = True
+            say("[mock] call on hold"); say("STATE: on-hold")
+        elif cmd == "unhold":
+            held["v"] = False
+            say("[mock] call resumed"); say("STATE: in-call")
+        elif cmd == "dtmf":
+            say(f"[mock] DTMF sent: {arg}")
+        elif cmd == "transfer":
+            say(f"[mock] transfer to {arg} requested")
+    read_commands(on_cmd)
+
+    say("STATE: calling")
+    say(f"[mock] dialing {number}")
+    if stop.wait(3.0):
+        say("[mock] hangup requested"); say("STATE: ended"); return 0
+    say("STATE: in-call")
+    say("[mock] connected (stays up until you hang up)")
+    stop.wait(600)
+    say("[mock] call finished")
+    say("STATE: ended")
+    return 0
+
+
+def run_mock_listen():
+    """Mock standby line. Use the page's test button (or: echo 'ring 9812345678' to stdin)."""
+    stop = threading.Event()
+    st = {"s": "standby"}
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
+
+    def on_cmd(cmd, arg):
+        if cmd == "hangup":
+            stop.set()
+        elif cmd == "ring" and st["s"] == "standby":
+            st["s"] = "ringing"
+            say("STATE: ringing"); say(f"INCOMING: {arg or '9812345678'}")
+        elif cmd == "answer" and st["s"] == "ringing":
+            st["s"] = "in-call"; say("[mock] answered"); say("STATE: in-call")
+        elif cmd in ("endcall", "decline") and st["s"] != "standby":
+            st["s"] = "standby"; say("[mock] call ended"); say("STATE: standby")
+        elif cmd == "hold" and st["s"] == "in-call":
+            st["s"] = "on-hold"; say("STATE: on-hold")
+        elif cmd == "unhold" and st["s"] == "on-hold":
+            st["s"] = "in-call"; say("STATE: in-call")
+        elif cmd == "dtmf":
+            say(f"[mock] DTMF sent: {arg}")
+    read_commands(on_cmd)
+    say("[mock] registered, waiting for incoming calls")
+    say("STATE: standby")
+    stop.wait()
+    return 0
+
+
+# --------------------------------------------------------------------------- pjsua
+def ensure_tls_cert(c):
+    """pjsua's TLS *listener* (the address we put in Contact) needs a certificate.
+    Without one every TLS handshake from the router fails with "no shared cipher": the router
+    can never deliver the caller's ACK, so an incoming call is dropped after ~32 s and hold is
+    refused ("call not confirmed"). Create a self-signed one once and reuse it.
+    Returns (cert_path, key_path) or None."""
+    cert = Path(c.get("tls_cert_file") or HERE / "tls" / "webcall-cert.pem")
+    key = Path(c.get("tls_privkey_file") or HERE / "tls" / "webcall-key.pem")
+    if cert.is_file() and key.is_file():
+        return str(cert), str(key)
+    import shutil
+    if not shutil.which("openssl"):
+        say("PROBLEM: 'openssl' command not found, cannot create a TLS certificate. Install it "
+            "(sudo apt install openssl) - incoming calls will drop after ~30 s without it")
+        return None
+    try:
+        cert.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-sha256",
+                        "-days", "3650", "-subj", "/CN=webcall-sip-client",
+                        "-keyout", str(key), "-out", str(cert)],
+                       check=True, capture_output=True, timeout=30)
+        os.chmod(key, 0o600)
+        say(f"[client] created a self-signed TLS certificate for the incoming-call listener: {cert}")
+        return str(cert), str(key)
+    except Exception as e:
+        say(f"PROBLEM: could not create a TLS certificate ({e}); incoming calls will drop after ~30 s")
+        return None
+
+
+def preflight(c, audio):
+    import shutil
+    problems = []
+    if not shutil.which(c["binary"]) and not Path(c["binary"]).exists():
+        problems.append(f"pjsua not found ('{c['binary']}'). Install/build it and put its full path in config.json -> pjsua.binary")
+    if not c.get("password"):
+        problems.append("no credentials yet - run: python3 start.py (logs in once and saves them)")
+    for k in ("id", "registrar", "proxy", "username", "domain_for_calls"):
+        v = str(c.get(k, ""))
+        if not v or "<" in v or "ROUTER" in v or "PRIVATE" in v:
+            problems.append(f"config.json -> pjsua.{k} is not filled in")
+    if audio == "file" and not Path(c["play_file"]).exists():
+        problems.append(f"audio file missing: {c['play_file']}")
+    return problems
+
+
+def run_pjsua(number, c, audio):
+    listen = number is None
+    if audio == "file":
+        wav = Path(c.get("play_file") or "")
+        if not wav.is_file():
+            fallback = HERE / "test.wav"
+            if fallback.is_file():
+                say(f"[note] play_file '{wav}' not found, using {fallback}")
+                wav = fallback
+        c["play_file"] = str(wav)
+    problems = preflight(c, audio)
+    if problems:
+        say("STATE: error")
+        for pr in problems:
+            say("PROBLEM: " + pr)
+        return 2
+
+    cmd = [
+        c["binary"],
+        f"--id={c['id']}",
+        f"--registrar={c['registrar']}",
+        f"--proxy={c['proxy']}",
+        f"--realm={c['realm']}",
+        f"--username={c['username']}",
+        f"--password={c['password']}",
+        "--no-color",                # plain log text (no ANSI escapes in the web log)
+        "--no-tcp" if c.get("use_tls") else "--no-tls",
+    ]
+    if audio == "file":
+        cmd += ["--null-audio", f"--play-file={c['play_file']}", "--auto-play",
+                "--auto-play-hangup", f"--duration={int(c['max_seconds'])}"]
+    else:
+        # Live audio: pjsua's mic/speaker are the virtual devices set up by server.py.
+        # The browser already does echo cancellation, so pjsua's own canceller is off.
+        cmd += ["--ec-tail=0"]
+        if c.get("capture_dev") is not None:
+            cmd.append(f"--capture-dev={int(c['capture_dev'])}")
+        if c.get("playback_dev") is not None:
+            cmd.append(f"--playback-dev={int(c['playback_dev'])}")
+        if int(c.get("max_call_seconds", 0) or 0) > 0:
+            cmd.append(f"--duration={int(c['max_call_seconds'])}")
+    if listen:
+        cmd.append("--auto-answer=180")   # ring the caller; we answer 200 when you press Answer
+    if c.get("use_tls"):
+        cmd += ["--use-tls"]
+        tls = ensure_tls_cert(c)
+        if tls:
+            cmd += [f"--tls-cert-file={tls[0]}", f"--tls-privkey-file={tls[1]}"]
+        if c.get("tls_cipher"):
+            cmd.append(f"--tls-cipher={c['tls_cipher']}")
+    cmd += [str(a) for a in c.get("extra_args", [])]
+    for name in c.get("disable_codecs", []):
+        cmd.append(f"--dis-codec={name}")
+    for name in c.get("add_codecs", []):
+        cmd.append(f"--add-codec={name}")
+    uri = build_uri(number, c) if not listen else None
+    # NOTE: the URI is NOT put on the command line. pjsua would INVITE immediately,
+    # before REGISTER finishes, and the Jio router answers "403 Forbidden" to
+    # unregistered users. We register first, then dial with the 'm' command.
+    say("STATE: connecting" if listen else "STATE: calling")
+    say(f"[pjsua] starting (password hidden, audio={audio}); waiting for registration"
+        + (" (standby for incoming calls)" if listen else " before dialing"))
+
+    import shutil as _shutil
+    run_cmd = cmd
+    if _shutil.which("stdbuf"):
+        # pjsua fully-buffers its stdout when it isn't a real terminal; stdbuf avoids late log bursts.
+        run_cmd = ["stdbuf", "-oL", "-eL"] + cmd
+
+    # IMPORTANT: stdin must stay OPEN (pjsua quits on EOF).
+    p = subprocess.Popen(run_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         stdin=subprocess.PIPE, text=True, bufsize=1)
+
+    st = {"dialed": False, "reg_failed": False, "held": False, "warned": False,
+          "stopping": False, "connected": False, "call_active": False, "inc_wait": 0,
+          "answered": False, "answer_failed": False, "calls": {}, "ending": False, "hold_failed": False}
+    disconnected = threading.Event()
+    hold_changed = threading.Event()
+    wlock = threading.Lock()
+
+    def send(text):
+        with wlock:
+            try:
+                p.stdin.write(text)
+                p.stdin.flush()
+            except Exception:
+                pass
+
+    def kill_pjsua():
+        if p.poll() is None:
+            p.terminate()
+            try:
+                p.wait(timeout=1.5)
+            except subprocess.TimeoutExpired:
+                p.kill()
+
+    def shutdown():
+        """Hang up -> unregister -> quit, with hard deadlines so we ALWAYS exit quickly."""
+        if st["stopping"]:
+            return
+        st["stopping"] = True
+
+        def seq():
+            if st["call_active"]:
+                send("ha\n")
+                disconnected.wait(1.5)           # wait for BYE to be answered
+            send("q\n")                          # pjsua unregisters, then quits
+            try:
+                p.wait(timeout=3.5)
+            except subprocess.TimeoutExpired:
+                pass
+            kill_pjsua()
+        threading.Thread(target=seq, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, lambda *_: shutdown())
+    signal.signal(signal.SIGINT, lambda *_: shutdown())
+
+    def mark_connected(why):
+        if st["call_active"] and not st["connected"]:
+            st["connected"] = True
+            say(f"[pjsua] call connected ({why})")
+            say("STATE: in-call")
+
+    def answer_watch():
+        """The caller's network may never send the ACK pjsua waits for (state CONFIRMED), but the
+        call IS answered once our 200 OK went out. Don't leave the page ringing forever."""
+        end = time.time() + 4.0
+        while time.time() < end:
+            if disconnected.is_set() or st["connected"] or st["answer_failed"] or not st["call_active"]:
+                return
+            time.sleep(0.1)
+        if st["call_active"] and not st["answer_failed"] and not disconnected.is_set():
+            mark_connected("answered; waiting for the caller's ACK")
+
+    def end_current_call(reject):
+        """Reject (ringing) or hang up (connected), and VERIFY pjsua really ended it."""
+        if not st["call_active"]:
+            say("STATE: standby")
+            return
+        disconnected.clear()
+        st["ending"] = True
+        first = "a\n603\n" if (reject and not st["answered"] and not st["connected"]) else "ha\n"
+        say("[pjsua] declining incoming call (603)" if first.startswith("a") else "[pjsua] hanging up")
+        send(first)
+        if disconnected.wait(2.5):
+            return
+        say("[client] call still active, retrying hang-up")
+        send("ha\n")
+        if disconnected.wait(2.5):
+            return
+        send("h\n")
+        if disconnected.wait(2.5):
+            return
+        say("PROBLEM: pjsua did not end the call; restarting the line so the call is dropped")
+        shutdown()                               # 'q' makes pjsua hang up everything and unregister
+
+    def confirm_hold(want):
+        """Report hold/resume only when pjsua really did it (the network accepted the re-INVITE)."""
+        if hold_changed.wait(6.0) and st["held"] == want:
+            return
+        if st["hold_failed"]:
+            st["hold_failed"] = False                      # reason was already reported
+        else:
+            say("PROBLEM: the network did not confirm the " + ("hold" if want else "resume") + " (no answer to the re-INVITE)")
+        say("STATE: on-hold" if st["held"] else "STATE: in-call")   # keep the page truthful
+
+    def on_cmd(cmd, arg):
+        if cmd == "hangup":
+            shutdown()
+        elif cmd == "answer":
+            if st["call_active"] and not st["connected"] and not st["answered"]:
+                st["answered"] = True
+                st["answer_failed"] = False
+                send("a\n200\n")                # pjsua: 'a' = answer, then asks for the SIP code
+                say("[pjsua] answering incoming call (200 OK sent)")
+                threading.Thread(target=answer_watch, daemon=True).start()
+        elif cmd in ("decline", "endcall"):
+            if listen:
+                threading.Thread(target=end_current_call, args=(cmd == "decline",), daemon=True).start()
+            else:
+                shutdown()
+        elif not st["connected"]:
+            say(f"[client] '{cmd}' ignored: call not connected yet")
+        elif cmd == "dtmf":
+            if arg:
+                send(f"#\n{arg}\n")              # pjsua: '#' = RFC 2833 DTMF, then asks for digits
+                say(f"[pjsua] DTMF sent: {arg}")
+        elif cmd == "hold":
+            if not st["held"]:
+                hold_changed.clear(); st["hold_failed"] = False
+                send("H\n")
+                threading.Thread(target=confirm_hold, args=(True,), daemon=True).start()
+        elif cmd == "unhold":
+            if st["held"]:
+                hold_changed.clear(); st["hold_failed"] = False
+                send("v\n")                      # re-INVITE = release hold
+                threading.Thread(target=confirm_hold, args=(False,), daemon=True).start()
+        elif cmd == "transfer":
+            target = build_uri(arg, c)
+            send(f"x\n{target}\n")
+            say(f"[pjsua] transfer requested -> {target}")
+    read_commands(on_cmd)
+
+    def reg_timeout():
+        if not st["dialed"] and p.poll() is None and not st["stopping"]:
+            say("STATE: error")
+            say("PROBLEM: no successful registration within 25 s (credentials will be refreshed automatically)")
+            shutdown()
+    reg_timer = threading.Timer(25.0, reg_timeout)
+    reg_timer.daemon = True            # a non-daemon timer kept this process alive ~25 s after
+    reg_timer.start()                  # every call, which blocked the next call
+
+    try:
+        for line in p.stdout:
+            line = line.rstrip()
+            low = line.lower()
+            if c["password"] and c["password"] in line:
+                line = line.replace(c["password"], "****")
+            say(line)
+            if 'sip.instance="<urn:uuid:' in low and not st["warned"]:
+                st["warned"] = True
+                say("NOTE: this pjsua is NOT the Jio-compatible build (+sip.instance still has 'urn:uuid:'). "
+                    "Run  bash setup.sh  and make sure config.json -> pjsua.binary points to /usr/local/bin/pjsua-jio")
+            if "handshake failed" in low and "in accepting" in low and not st.get("hs_warned"):
+                st["hs_warned"] = True
+                say("PROBLEM: the router tried to open a TLS connection to this PC (to deliver the caller's ACK) "
+                    "and the handshake failed: " + line.split("Handshake failed", 1)[-1].strip()[:140]
+                    + ". Incoming calls will drop after ~30 s. Check that tls/webcall-cert.pem exists, or set "
+                      "pjsua.tls_cipher in config.json")
+            if audio == "browser" and ("no suitable sound device" in low or "unable to open sound device" in low
+                                       or "error opening sound device" in low):
+                say("PROBLEM: pjsua could not open the (virtual) sound device. Is PulseAudio/PipeWire running? "
+                    "You can pick devices with config.json -> pjsua.capture_dev / playback_dev (see pjsua's device list in the log above).")
+            # pjsua prints "Call 0 is DISCONNECTED [reason=...]" (some builds: "state changed to DISCONNECTED")
+            for mm in re.finditer(r"call (\d+) state changed to (\w+)", low):
+                st["calls"][mm.group(1)] = mm.group(2)
+            for mm in re.finditer(r"call (\d+) is disconnected", low):
+                st["calls"][mm.group(1)] = "disconnected"
+            is_disc = bool("state changed to disconnected" in low or re.search(r"call \d+ is disconnected", low))
+            ring = ("incoming call for account" in low or "state changed to incoming" in low)
+            if ring and listen and not st["stopping"] and not st["call_active"]:
+                st["call_active"] = True
+                st["connected"] = False
+                st["inc_wait"] = 10
+                disconnected.clear()
+                say("STATE: ringing")
+            elif st["inc_wait"] > 0:
+                st["inc_wait"] -= 1
+                m = re.search(r'from:\s*(?:"[^"]*"\s*)?<?(?:sip|tel|sips):([^@>;\s]+)', low)
+                if m:
+                    st["inc_wait"] = 0
+                    say(f"INCOMING: {m.group(1)}")
+            if "registration success" in low and not st["dialed"] and not st["stopping"]:
+                st["dialed"] = True
+                reg_timer.cancel()
+                if listen:
+                    say("[pjsua] registered OK - waiting for incoming calls")
+                    say("STATE: standby")
+                else:
+                    st["call_active"] = True
+                    say(f"[pjsua] registered OK -> dialing {uri}")
+                    send(f"m\n{uri}\n")
+            elif "registration failed" in low and not st["dialed"]:
+                st["reg_failed"] = True
+                reg_timer.cancel()
+                say("STATE: error")
+                reason = line.split("registration failed,", 1)[-1].strip()
+                if "whitelist" in low:
+                    say(f"PROBLEM: the router/Jio rejected this device: {reason}. Login worked; the router only accepts devices it recognises, so this is not a username/password issue.")
+                else:
+                    say(f"PROBLEM: SIP registration was rejected: {reason}. Fetching fresh credentials from the router automatically; run python3 start.py --relogin if it keeps failing.")
+                shutdown()
+            elif "registration failed" in low and st["dialed"] and listen and not st["stopping"]:
+                say("STATE: error")
+                say("PROBLEM: the line lost its registration (" + line.split("registration failed,", 1)[-1].strip() + "); reconnecting")
+                shutdown()
+            elif "state changed to confirmed" in low:
+                if st["connected"]:
+                    pass                          # already reported (answered before the ACK arrived)
+                else:
+                    st["connected"] = True
+                    say("STATE: in-call")
+            elif "state changed to connecting" in low and listen:
+                mark_connected("our 200 OK was sent")
+            elif ("no pending incoming call" in low
+                  or ("no current call" in low and st["answered"] and not st["connected"])) and listen:
+                st["answer_failed"] = True
+                st["answered"] = False
+                say("PROBLEM: pjsua says there is no pending incoming call to answer")
+            elif "status is local hold" in low and not st["held"]:
+                st["held"] = True
+                say("STATE: on-hold")
+                hold_changed.set()
+            elif "status is active" in low and st["held"]:
+                st["held"] = False
+                say("STATE: in-call")
+                hold_changed.set()
+            elif "can not hold call" in low or "can not re-invite call" in low:
+                st["hold_failed"] = True
+                hold_changed.set()
+                say("PROBLEM: hold failed: the call is not fully established yet (the caller's ACK has not arrived)")
+            elif "status is remote hold" in low:
+                st["remote_hold"] = True
+                say("NOTE: the other person put the call on hold")
+            elif "status is active" in low and st.get("remote_hold"):
+                st["remote_hold"] = False
+                say("NOTE: the other person resumed the call")
+            elif is_disc:
+                disconnected.set()
+                live = [k for k, v in st["calls"].items() if v != "disconnected"]
+                if listen and live and not st["stopping"]:
+                    # Jio can fork one incoming call into several legs; one ending is not the end.
+                    if st["ending"]:
+                        say(f"[pjsua] closing {len(live)} other leg(s) of this call")
+                        send("ha\n")
+                else:
+                    st.update(call_active=False, connected=False, held=False, inc_wait=0,
+                              answered=False, answer_failed=False, ending=False, calls={})
+                    if listen and not st["stopping"]:
+                        say("STATE: standby")    # stay registered and keep waiting for calls
+                    else:
+                        say("STATE: ended")
+                        shutdown()               # outgoing call over -> unregister and exit right away
+    finally:
+        reg_timer.cancel()
+        kill_pjsua()
+    code = p.wait()
+    if st["reg_failed"]:
+        return 2
+    return 0 if st["stopping"] or code == 0 else code
+
+
+def main():
+    args = sys.argv[1:]
+    audio_override = None
+    if "--audio" in args:
+        i = args.index("--audio")
+        audio_override = args[i + 1] if i + 1 < len(args) else None
+        del args[i:i + 2]
+    if not ((len(args) == 2 and args[0] == "call") or (len(args) == 1 and args[0] == "listen")):
+        say("usage: jio-sip-client call <number> | listen   [--audio browser|file|mock]")
+        return 2
+    number = args[1] if args[0] == "call" else None
+    cfg = load_config()
+    if cfg.get("mode") == "mock" or audio_override == "mock":
+        return run_mock(number) if number else run_mock_listen()
+    if cfg.get("mode") == "pjsua":
+        audio = audio_override or cfg["pjsua"].get("audio", "browser")
+        return run_pjsua(number, cfg["pjsua"], "file" if audio == "file" else "browser")
+    say("STATE: error")
+    say("Unknown mode in config.json")
+    return 2
+
+
+if __name__ == "__main__":
+    code = main()
+    sys.stdout.flush()
+    os._exit(code)   # never wait for stray threads

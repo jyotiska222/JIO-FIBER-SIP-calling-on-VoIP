@@ -1,0 +1,12 @@
+# personal / generated - never commit
+config.json
+config.json.bak
+config.json.tmp
+tls/
+__pycache__/
+*.wav
+*.pem
+*.key
+.env
+*.log
+microsip.ini

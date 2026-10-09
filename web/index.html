@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Web Call</title>
+
+<style>
+  :root {
+    --bg: #f2f4f1; --ink: #1d2a24; --muted: #5d6b64; --line: #c9d1cc;
+    --accent: #1f6f50; --bad: #a63a2b; --panel: #ffffff; --log-bg: #f7f9f7; --soft: #eef2ef;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14191a; --ink: #e6ece8; --muted: #92a19a; --line: #2d3836;
+      --accent: #4fbf93; --bad: #e07a68; --panel: #1b2223; --log-bg: #151b1c; --soft: #222b2c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--bg); color: var(--ink);
+    font: 16px/1.5 Georgia, "Times New Roman", serif;
+    display: flex; justify-content: center; align-items: flex-start; padding: 50px 20px;
+  }
+  main { width: 100%; max-width: 820px; }
+  header { margin-bottom: 24px; }
+  h1 { font-size: 2rem; font-weight: 600; margin: 0 0 6px; }
+  p.sub { margin: 0; color: var(--muted); }
+
+  .panel, .status-panel, .log-panel, .controls {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin-bottom: 20px;
+  }
+  .panel { padding: 28px; }
+  label { display: block; font-size: .95rem; color: var(--muted); margin-bottom: 8px; }
+  input[type=text], input[type=tel], #num, #xfer {
+    width: 100%; font: 1.5rem/1.2 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    padding: 16px; background: transparent; color: var(--ink);
+    border: 1px solid var(--line); border-radius: 7px; outline: none;
+  }
+  #num:focus, #xfer:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+  }
+  .row { display: flex; gap: 14px; margin-top: 18px; }
+  button {
+    flex: 1; font: inherit; font-weight: 600; padding: 14px; border-radius: 7px;
+    border: 1px solid transparent; cursor: pointer; color: var(--ink);
+    transition: opacity .2s, transform .1s, background .2s;
+  }
+  button:active:not(:disabled) { transform: scale(.98); }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button:focus-visible, input:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  #call { background: var(--accent); color: white; }
+  #hang { background: var(--bad); color: white; }
+
+  /* STATUS */
+  .status-panel { padding: 20px 24px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+  .status-title { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 4px; }
+  #status { font-size: 1.3rem; font-weight: 600; }
+  #status[data-s="in-call"], #status[data-s="calling"], #status[data-s="on-hold"] { color: var(--accent); }
+  #status[data-s="error"] { color: var(--bad); }
+  .right { display: flex; align-items: center; gap: 16px; }
+  #timer { font: 1.2rem ui-monospace, Menlo, Consolas, monospace; color: var(--muted); min-width: 4.5ch; text-align: right; }
+  .status-indicator { width: 15px; height: 15px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+  #status[data-s="calling"] ~ .right .status-indicator,
+  #status[data-s="in-call"] ~ .right .status-indicator { background: var(--accent); box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 15%, transparent); }
+
+  /* CONTROLS */
+  .controls { padding: 22px 24px; }
+  .controls[hidden] { display: none; }
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .grid button { background: var(--soft); border-color: var(--line); display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 14px 6px; font-size: .9rem; }
+  .grid button .ic { font-size: 1.4rem; line-height: 1; }
+  .grid button[aria-pressed="true"] { background: var(--accent); color: white; border-color: var(--accent); }
+  .meter-row { display: flex; align-items: center; gap: 14px; margin-top: 18px; font-size: .9rem; color: var(--muted); }
+  .meter-row span.lbl { min-width: 5.5em; }
+  .meter { flex: 1; height: 8px; background: var(--soft); border-radius: 4px; overflow: hidden; border: 1px solid var(--line); }
+  .meter > div { height: 100%; width: 0%; background: var(--accent); transition: width .08s linear; }
+  .meter-row input[type=range] { flex: 1; accent-color: var(--accent); }
+  #pad { margin-top: 18px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; max-width: 320px; }
+  #pad[hidden], #xferbox[hidden] { display: none; }
+  #pad button { background: var(--soft); border-color: var(--line); font: 1.3rem ui-monospace, Menlo, Consolas, monospace; padding: 12px; }
+  #xferbox { margin-top: 18px; display: flex; gap: 10px; }
+  #xfer { font-size: 1.1rem; padding: 10px 14px; flex: 1; }
+  #xferbox button { flex: 0 0 auto; background: var(--soft); border-color: var(--line); padding: 10px 18px; }
+  #toast { margin-top: 16px; padding: 10px 14px; border-radius: 7px; background: var(--soft); border: 1px solid var(--line); font-size: .9rem; }
+  #toast[hidden] { display: none; }
+  .controls .hangrow { margin-top: 20px; }
+  .controls .hangrow button { width: 100%; }
+
+  /* INCOMING */
+  .incoming { background: var(--panel); border: 2px solid var(--accent); border-radius: 10px; padding: 24px; margin-bottom: 20px; text-align: center; animation: pulse 1.2s ease-in-out infinite; }
+  .incoming[hidden] { display: none; }
+  .incoming .who { font: 2rem ui-monospace, Menlo, Consolas, monospace; margin: 4px 0 2px; word-break: break-all; }
+  .incoming .lbl { color: var(--muted); text-transform: uppercase; letter-spacing: .08em; font-size: .8rem; }
+  .incoming .row { justify-content: center; }
+  #answer { background: var(--accent); color: white; }
+  #decline { background: var(--bad); color: white; }
+  @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 35%, transparent); } 50% { box-shadow: 0 0 0 10px transparent; } }
+  @media (prefers-reduced-motion: reduce) { .incoming { animation: none; } }
+
+  /* LOG */
+  .log-panel { overflow: hidden; margin-bottom: 0; }
+  .log-header { padding: 16px 20px; border-bottom: 1px solid var(--line); }
+  .log-title { font-size: 1.05rem; font-weight: 600; }
+  .log-description { color: var(--muted); font-size: .85rem; }
+  pre {
+    margin: 0; padding: 20px; height: 320px; overflow: auto; background: var(--log-bg); color: var(--ink);
+    font: .85rem/1.6 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    white-space: pre-wrap; word-break: break-word; scrollbar-width: thin;
+  }
+  @media (max-width: 600px) {
+    body { padding: 25px 12px; } h1 { font-size: 1.6rem; } .panel { padding: 20px; }
+    .row { flex-direction: column; } .grid { grid-template-columns: repeat(2, 1fr); } pre { height: 280px; font-size: .78rem; }
+  }
+  #prov { background: var(--panel); border: 2px solid var(--accent); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  #prov[hidden] { display: none; }
+  #prov .row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  #prov input { flex: 1; min-width: 120px; }
+  #provMsg { margin: 0; font-size: 14px; }
+  #fixLogin { background: none; border: none; color: var(--muted); text-decoration: underline; cursor: pointer; font-size: 12px; padding: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Web Call</h1>
+    <p class="sub">Enter a number and press Call. Your browser microphone is used to talk, and the other person is heard through your speakers.</p>
+  </header>
+
+  <section class="panel">
+    <form id="f">
+      <label for="num">Phone number</label>
+      <input id="num" name="num" type="tel" inputmode="tel" autocomplete="off" placeholder="9876543210" required>
+      <div class="row">
+        <button id="call" type="submit">Call</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="incoming" id="incoming" hidden role="alert">
+    <div class="lbl">Incoming call</div>
+    <div class="who" id="caller">Unknown</div>
+    <div class="row">
+      <button id="answer" type="button">Answer</button>
+      <button id="decline" type="button">Decline</button>
+    </div>
+  </section>
+
+  <section class="status-panel">
+    <div>
+      <div class="status-title">Call status</div>
+      <div id="status" data-s="idle" role="status">Idle</div>
+    </div>
+    <div class="right">
+      <div id="timer" aria-label="Call duration"></div>
+      <div class="status-indicator" aria-hidden="true"></div>
+    </div>
+  </section>
+
+  <!-- IN-CALL CONTROLS -->
+  <section class="controls" id="controls" hidden>
+    <div class="grid">
+      <button id="bMute" type="button" aria-pressed="false"><span class="ic">🎙️</span><span>Mute</span></button>
+      <button id="bHold" type="button" aria-pressed="false"><span class="ic">⏸️</span><span>Hold</span></button>
+      <button id="bPad"  type="button" aria-pressed="false"><span class="ic">⌨️</span><span>Keypad</span></button>
+      <button id="bSpk"  type="button" aria-pressed="false"><span class="ic">🔊</span><span>Speaker</span></button>
+      <button id="bXfer" type="button" aria-pressed="false"><span class="ic">↪️</span><span>Transfer</span></button>
+    </div>
+
+    <div class="meter-row"><span class="lbl">Microphone</span><div class="meter"><div id="micLevel"></div></div></div>
+    <div class="meter-row"><span class="lbl">Volume</span><input id="vol" type="range" min="0" max="200" value="100" aria-label="Speaker volume"><span id="volTxt" style="min-width:3.5ch;text-align:right">100%</span></div>
+
+    <div id="pad" hidden>
+      <button type="button" data-k="1">1</button><button type="button" data-k="2">2</button><button type="button" data-k="3">3</button>
+      <button type="button" data-k="4">4</button><button type="button" data-k="5">5</button><button type="button" data-k="6">6</button>
+      <button type="button" data-k="7">7</button><button type="button" data-k="8">8</button><button type="button" data-k="9">9</button>
+      <button type="button" data-k="*">*</button><button type="button" data-k="0">0</button><button type="button" data-k="#">#</button>
+    </div>
+
+    <div id="xferbox" hidden>
+      <input id="xfer" type="tel" inputmode="tel" autocomplete="off" placeholder="Transfer to number" aria-label="Transfer to number">
+      <button id="xferGo" type="button">Transfer</button>
+    </div>
+
+    <div id="prov" hidden role="status">
+      <strong>Jio login</strong>
+      <p id="provMsg"></p>
+      <div class="row" id="provOtp" hidden>
+        <button id="provSend" type="button">Send OTP</button>
+        <input id="provCode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="8" placeholder="Enter OTP" aria-label="OTP">
+        <button id="provGo" type="button">Log in</button>
+      </div>
+    </div>
+    <div id="toast" hidden role="status"></div>
+    <button id="fixLogin" type="button" title="Fetch new Jio credentials from the router">Fix login / refresh credentials</button>
+    <div class="hangrow"><button id="hang" type="button">Hang up</button></div>
+  </section>
+
+  <section class="log-panel">
+    <div class="log-header">
+      <div class="log-title">Server Output</div>
+      <div class="log-description">Live SIP / call activity and server messages</div>
+    </div>
+    <pre id="log" aria-label="Call log"></pre>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const labels = { idle: "Idle", standby: "Idle · ready for incoming calls", connecting: "Connecting line…", ringing: "Incoming call…", calling: "Calling…", "in-call": "Connected", "on-hold": "On hold", ended: "Call ended", error: "Something went wrong" };
+const ACTIVE = ["calling", "ringing", "in-call", "on-hold"];
+
+let notice = "", noticeUntil = 0, starting = false;
+let lastState = "idle", audioMode = "browser";
+let muted = false, spkOff = false, volume = 1;
+let A = null;                       // live audio session (mic stream, AudioContext, WebSocket, ...)
+
+function showNotice(msg) { notice = msg; noticeUntil = Date.now() + 8000; }
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+  });
+  return { status: r.status, data: await r.json() };
+}
+
+/* ------------------------------------------------------------------ browser audio */
+const WORKLET = `
+class Cap extends AudioWorkletProcessor {
+  constructor() { super(); this.ratio = sampleRate / 16000; this.acc = 0; this.n = 0; this.pos = 0;
+    this.next = this.ratio; this.out = new Int16Array(320); this.o = 0; }
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (!ch) return true;
+    for (let i = 0; i < ch.length; i++) {
+      this.acc += ch[i]; this.n++; this.pos++;
+      if (this.pos >= this.next) {                       // box-filter downsample to 16 kHz
+        let v = this.acc / this.n; this.acc = 0; this.n = 0; this.next += this.ratio;
+        v = Math.max(-1, Math.min(1, v));
+        this.out[this.o++] = v < 0 ? v * 32768 : v * 32767;
+        if (this.o === 320) {                            // 20 ms frame
+          const buf = this.out.buffer; this.port.postMessage(buf, [buf]);
+          this.out = new Int16Array(320); this.o = 0;
+        }
+      }
+    }
+    return true;
+  }
+}
+registerProcessor("cap", Cap);`;
+
+function micError(err) {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)
+    return "The browser blocks the microphone on this address. Open the page as http://localhost:8080 (or use HTTPS).";
+  switch (err && err.name) {
+    case "NotAllowedError": case "SecurityError":
+      return "Microphone permission was blocked. Click the 🔒 icon in the address bar, allow the microphone, then call again.";
+    case "NotFoundError": return "No microphone was found on this computer.";
+    case "NotReadableError": return "The microphone is in use by another app.";
+    default: return "Could not start the microphone: " + (err && (err.message || err.name) || err);
+  }
+}
+
+async function startMic() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error("no-mediadevices");
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+  });
+  const ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "interactive" });
+  await ctx.resume();
+  const url = URL.createObjectURL(new Blob([WORKLET], { type: "application/javascript" }));
+  await ctx.audioWorklet.addModule(url);
+  URL.revokeObjectURL(url);
+
+  const src = ctx.createMediaStreamSource(stream);
+  const node = new AudioWorkletNode(ctx, "cap");
+  const mute0 = ctx.createGain(); mute0.gain.value = 0;           // keeps the node pulled without echoing the mic
+  src.connect(node); node.connect(mute0); mute0.connect(ctx.destination);
+  const analyser = ctx.createAnalyser(); analyser.fftSize = 512; src.connect(analyser);
+  const spk = ctx.createGain(); spk.gain.value = spkOff ? 0 : volume; spk.connect(ctx.destination);
+
+  A = { stream, ctx, node, analyser, spk, ws: null, nextT: 0, raf: 0 };
+  node.port.onmessage = e => {
+    const ws = A && A.ws;
+    if (!ws || ws.readyState !== 1 || ws.bufferedAmount > 64000) return;
+    ws.send(muted ? new Int16Array(320).buffer : e.data);        // muted = send silence
+  };
+  const data = new Uint8Array(analyser.fftSize);
+  (function meter() {
+    if (!A) return;
+    analyser.getByteTimeDomainData(data);
+    let peak = 0; for (const v of data) peak = Math.max(peak, Math.abs(v - 128));
+    $("micLevel").style.width = muted ? "0%" : Math.min(100, peak / 128 * 220) + "%";
+    A.raf = requestAnimationFrame(meter);
+  })();
+}
+
+function openAudioSocket() {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/audio");
+    ws.binaryType = "arraybuffer";
+    ws.onopen = () => { if (A) A.ws = ws; resolve(); };
+    ws.onerror = () => reject(new Error("Could not open the audio connection to the server."));
+    ws.onmessage = e => playPcm(e.data);
+    ws.onclose = () => { if (A && A.ws === ws) A.ws = null; };
+  });
+}
+
+function playPcm(buf) {
+  if (!A || buf.byteLength < 2) return;
+  const pcm = new Int16Array(buf, 0, buf.byteLength >> 1);
+  const ab = A.ctx.createBuffer(1, pcm.length, 16000);
+  const ch = ab.getChannelData(0);
+  for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+  const s = A.ctx.createBufferSource(); s.buffer = ab; s.connect(A.spk);
+  const now = A.ctx.currentTime;
+  if (A.nextT < now + 0.02) A.nextT = now + 0.06;                // (re)build a small jitter buffer
+  if (A.nextT - now > 0.5) A.nextT = now + 0.06;                 // too far behind: skip ahead
+  s.start(A.nextT); A.nextT += ab.duration;
+}
+
+function stopAudio() {
+  if (!A) return;
+  const a = A; A = null;
+  cancelAnimationFrame(a.raf);
+  try { a.ws && a.ws.close(); } catch (e) {}
+  try { a.stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+  try { a.node.disconnect(); a.ctx.close(); } catch (e) {}
+  $("micLevel").style.width = "0%";
+}
+
+/* ------------------------------------------------------------------ call / hang up */
+$("f").addEventListener("submit", async e => {
+  e.preventDefault();
+  if (starting) return;
+  starting = true; $("call").disabled = true; $("call").textContent = "Starting…";
+  muted = false; syncButtons();
+  try {
+    if (audioMode !== "file") {
+      try { await startMic(); }
+      catch (err) { stopAudio(); showNotice(micError(err)); return; }
+    }
+    let res;
+    try { res = await api("/api/call", { number: $("num").value }); }
+    catch (err) { stopAudio(); showNotice("Cannot reach the server: " + err); return; }
+    const d = res.data;
+    if (d.error || d.ok === false) { stopAudio(); showNotice(d.error || d.message || "Call failed"); return; }
+    if (audioMode !== "file") {
+      try { await openAudioSocket(); }
+      catch (err) { showNotice(err.message); await api("/api/hangup", {}); stopAudio(); }
+    }
+  } finally {
+    starting = false; $("call").textContent = "Call"; poll();
+  }
+});
+
+$("hang").addEventListener("click", async () => {
+  try { await api("/api/hangup", {}); } catch (err) { showNotice("Cannot reach the server: " + err); }
+  stopAudio(); poll();
+});
+
+/* ------------------------------------------------------------------ incoming calls */
+let ringCtx = null, ringTimer = null, titleTimer = null;
+function unlockRing() {                      // browsers only allow sound after a click/keypress
+  if (!ringCtx) { try { ringCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (ringCtx && ringCtx.state === "suspended") ringCtx.resume();
+}
+["pointerdown", "keydown"].forEach(ev => window.addEventListener(ev, unlockRing, { passive: true }));
+
+function ringBurst() {
+  if (!ringCtx || ringCtx.state !== "running") return;
+  const t = ringCtx.currentTime, g = ringCtx.createGain();
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(0.12, t + 0.05);
+  g.gain.setValueAtTime(0.12, t + 0.9); g.gain.linearRampToValueAtTime(0, t + 1.0);
+  g.connect(ringCtx.destination);
+  [440, 480].forEach(f => { const o = ringCtx.createOscillator(); o.frequency.value = f; o.connect(g); o.start(t); o.stop(t + 1.05); });
+}
+function startRinging(who) {
+  if (ringTimer) return;
+  ringBurst(); ringTimer = setInterval(ringBurst, 3000);
+  let on = false;
+  titleTimer = setInterval(() => { on = !on; document.title = on ? "📞 Incoming: " + who : "Web Call"; }, 800);
+  if ("Notification" in window && Notification.permission === "granted") { try { new Notification("Incoming call", { body: who }); } catch (e) {} }
+}
+function stopRinging() {
+  clearInterval(ringTimer); clearInterval(titleTimer); ringTimer = titleTimer = null; document.title = "Web Call";
+}
+
+$("answer").addEventListener("click", async () => {
+  if (starting) return;
+  starting = true; $("answer").disabled = true; muted = false; syncButtons();
+  try {
+    try { await startMic(); }
+    catch (err) { stopAudio(); showNotice(micError(err)); return; }       // not answered; you can still Decline
+    let res;
+    try { res = await api("/api/answer", {}); }
+    catch (err) { stopAudio(); showNotice("Cannot reach the server: " + err); return; }
+    if (res.data.ok === false || res.data.error) { stopAudio(); showNotice(res.data.message || res.data.error); return; }
+    try { await openAudioSocket(); }
+    catch (err) { showNotice(err.message); await api("/api/hangup", {}); stopAudio(); }
+  } finally { starting = false; $("answer").disabled = false; poll(); }
+});
+$("decline").addEventListener("click", async () => {
+  $("decline").disabled = true; $("decline").textContent = "Declining…";
+  try {
+    const r = await api("/api/decline", {});
+    if (r.data.ok === false) showNotice(r.data.message || "Could not decline");
+  } catch (err) { showNotice("Cannot reach the server: " + err); }
+  poll();                       // the panel closes only when the server reports the call really ended
+});
+if ("Notification" in window && Notification.permission === "default") {
+  window.addEventListener("pointerdown", () => Notification.requestPermission(), { once: true });
+}
+
+/* ------------------------------------------------------------------ controls */
+function syncButtons() {
+  $("bMute").setAttribute("aria-pressed", muted);
+  $("bMute").querySelector(".ic").textContent = muted ? "🔇" : "🎙️";
+  $("bMute").querySelector("span:last-child").textContent = muted ? "Unmute" : "Mute";
+  $("bSpk").setAttribute("aria-pressed", spkOff);
+  $("bSpk").querySelector(".ic").textContent = spkOff ? "🔈" : "🔊";
+  $("bSpk").querySelector("span:last-child").textContent = spkOff ? "Speaker off" : "Speaker";
+  if (A) A.spk.gain.value = spkOff ? 0 : volume;
+}
+$("bMute").onclick = () => { muted = !muted; syncButtons(); };
+$("bSpk").onclick  = () => { spkOff = !spkOff; syncButtons(); };
+$("vol").oninput   = e => { volume = e.target.value / 100; $("volTxt").textContent = e.target.value + "%"; syncButtons(); };
+
+$("bHold").onclick = async () => {
+  const hold = lastState !== "on-hold";
+  const r = await api("/api/hold", { hold });
+  if (r.data.ok === false) showNotice(r.data.message || "Could not change hold");
+  poll();
+};
+$("bPad").onclick = () => {
+  const open = $("pad").hidden;
+  $("pad").hidden = !open; $("bPad").setAttribute("aria-pressed", open);
+};
+$("bXfer").onclick = () => {
+  const open = $("xferbox").hidden;
+  $("xferbox").hidden = !open; $("bXfer").setAttribute("aria-pressed", open);
+  if (open) $("xfer").focus();
+};
+$("pad").addEventListener("click", async e => {
+  const k = e.target.closest("button[data-k]"); if (!k) return;
+  const r = await api("/api/dtmf", { digits: k.dataset.k });
+  if (r.data.ok === false || r.data.error) showNotice(r.data.message || r.data.error);
+});
+$("xferGo").onclick = async () => {
+  const n = $("xfer").value.trim(); if (!n) return;
+  const r = await api("/api/transfer", { number: n });
+  if (r.data.ok === false || r.data.error) showNotice(r.data.message || r.data.error);
+  else { $("xfer").value = ""; $("xferbox").hidden = true; $("bXfer").setAttribute("aria-pressed", false); }
+};
+
+/* ------------------------------------------------------------------ status polling */
+let seenNotice = null, toastTimer = null;
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.hidden = false;
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, 8000);
+}
+const fmt = s => String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
+
+async function poll() {
+  try {
+    const { data } = await api("/api/status");
+    audioMode = data.audio || audioMode;
+    const st = data.state, busy = ACTIVE.includes(st);
+
+    if (lastState !== st && !busy) {               // call finished -> release mic + audio
+      stopAudio();
+      $("pad").hidden = true; $("bPad").setAttribute("aria-pressed", false);
+      $("xferbox").hidden = true; $("bXfer").setAttribute("aria-pressed", false);
+      muted = false; syncButtons();
+    }
+    lastState = st;
+
+    const showingNotice = Date.now() < noticeUntil && !busy;
+    $("status").dataset.s = showingNotice ? "error" : st;
+    $("status").textContent = showingNotice ? notice : (labels[st] || st);
+
+    $("call").disabled = busy || starting;
+    $("answer").disabled = starting;
+    if (seenNotice === null) seenNotice = data.notice_id || 0;          // ignore notices from before this page opened
+    else if ((data.notice_id || 0) > seenNotice) { seenNotice = data.notice_id; if (busy && data.notice) toast(data.notice); }
+    const ringing = st === "ringing";
+    $("incoming").hidden = !ringing;
+    if (ringing) { $("caller").textContent = data.number || "Unknown number"; startRinging(data.number || "Unknown"); }
+    else { stopRinging(); $("decline").disabled = false; $("decline").textContent = "Decline"; }
+    $("controls").hidden = !busy || ringing;
+    $("bHold").setAttribute("aria-pressed", st === "on-hold");
+    $("bHold").querySelector(".ic").textContent = st === "on-hold" ? "▶️" : "⏸️";
+    $("bHold").querySelector("span:last-child").textContent = st === "on-hold" ? "Resume" : "Hold";
+    $("bHold").disabled = st === "calling";
+    $("bPad").disabled = $("bXfer").disabled = st === "calling";
+    $("timer").textContent = busy && data.elapsed ? fmt(data.elapsed) : "";
+
+    const el = $("log");
+    const atEnd = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+    el.textContent = Array.isArray(data.log) ? data.log.join("\n") : String(data.log || "");
+    if (atEnd) el.scrollTop = el.scrollHeight;
+  } catch (err) {
+    $("status").dataset.s = "error";
+    $("status").textContent = "Server unavailable";
+  }
+}
+setInterval(poll, 1000);
+window.addEventListener("beforeunload", stopAudio);
+syncButtons(); poll();
+/* ------------------------------------------------------------------ Jio credential auto-refresh */
+async function provPoll() {
+  try {
+    const r = await fetch("/api/provision"); const d = await r.json();
+    const box = $("prov"), show = d.state === "working" || d.state === "need-otp" || d.state === "failed" || (d.needs_login && d.state !== "ok");
+    box.hidden = !show;
+    $("provMsg").textContent = d.message || (d.needs_login ? "No credentials yet. Logging in..." : "");
+    $("provOtp").hidden = d.state !== "need-otp";
+  } catch (e) {}
+}
+async function provPost(path, body) { const r = await api(path, body || {}); const m = r.data.message || r.data.error; if (m) toast(m); provPoll(); }
+$("provSend").onclick = () => provPost("/api/provision/send-otp");
+$("provGo").onclick = () => provPost("/api/provision/otp", { otp: $("provCode").value });
+$("fixLogin").onclick = () => provPost("/api/provision/refresh");
+setInterval(provPoll, 2000); provPoll();
+</script>
+</body>
+</html>
