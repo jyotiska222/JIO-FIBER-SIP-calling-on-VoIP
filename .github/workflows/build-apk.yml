@@ -1,9 +1,3 @@
-# Builds the Android app (the project lives in the app/ folder) and publishes the APK as a GitHub Release.
-#
-#   Publish a new version:   git tag v1.0 && git push origin v1.0
-#   Just test the build:     GitHub -> Actions -> "Build and release APK" -> Run workflow
-#
-# Anyone can then download the APK from the repository's "Releases" page (no GitHub login needed).
 name: Build and release APK
 
 on:
@@ -12,33 +6,36 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write            # needed to create the release
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: app      # <- folder that contains gradlew, native/ and app/
+        working-directory: app
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: '17'
 
-      - name: Install the Android NDK version the native build was tested with
+      - name: Install Android NDK
         run: |
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;26.1.10909125" >/dev/null
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> "$GITHUB_ENV"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            --install "ndk;26.1.10909125" >/dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" \
+            >> "$GITHUB_ENV"
 
-      - name: Build the SIP engine (arm64-v8a = nearly every phone made since ~2016)
+      - name: Build SIP engine
         run: |
           chmod +x native/build.sh gradlew
           ./native/build.sh arm64-v8a
 
-      - name: Set up release signing (only if you added the signing secrets)
+      - name: Set up release signing
         env:
           KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -48,24 +45,29 @@ jobs:
           if [ -n "$KEYSTORE_B64" ]; then
             echo "$KEYSTORE_B64" | base64 -d > release.jks
             printf 'storeFile=release.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
-              "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > keystore.properties
+              "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" \
+              > keystore.properties
             echo "SIGNED=1" >> "$GITHUB_ENV"
           else
             echo "No signing secrets: building a debug-signed APK."
           fi
 
-      - name: Build the APK
+      - name: Build APK
         run: |
           if [ "$SIGNED" = "1" ]; then
             ./gradlew assembleRelease
-            cp app/build/outputs/apk/release/app-release.apk JioFiberCalling.apk
+            cp app/build/outputs/apk/release/app-release.apk \
+              JioFiberCalling.apk
           else
             ./gradlew assembleDebug
-            cp app/build/outputs/apk/debug/app-debug.apk JioFiberCalling.apk
+            cp app/build/outputs/apk/debug/app-debug.apk \
+              JioFiberCalling.apk
           fi
-          sha256sum JioFiberCalling.apk | tee JioFiberCalling.apk.sha256
 
-      - name: Keep a copy with the workflow run
+          sha256sum JioFiberCalling.apk \
+            | tee JioFiberCalling.apk.sha256
+
+      - name: Upload APK as workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: JioFiberCalling-apk
@@ -73,14 +75,43 @@ jobs:
             app/JioFiberCalling.apk
             app/JioFiberCalling.apk.sha256
 
-      - name: Publish the GitHub Release (only when you pushed a v* tag)
+      - name: Publish or update GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           SHA=$(cut -d' ' -f1 JioFiberCalling.apk.sha256)
-          NOTES="Download **JioFiberCalling.apk**, copy it to your Android phone and open it (allow \"Install unknown apps\" when asked). Android 8.0+, 64-bit phones. See the README for first-run steps.
 
-          SHA-256: \`$SHA\`"
-          gh release create "$GITHUB_REF_NAME" JioFiberCalling.apk JioFiberCalling.apk.sha256 \
-            --repo "$GITHUB_REPOSITORY" --title "JioFiber Calling $GITHUB_REF_NAME" --notes "$NOTES"
+          NOTES="Download JioFiberCalling.apk and install it on your Android phone.
+
+          Requirements: Android 8.0+ and a 64-bit phone.
+          See the README for first-run instructions.
+
+          SHA-256: $SHA"
+
+          if gh release view "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+
+            echo "Release already exists. Updating APK and checksum..."
+
+            gh release upload "$GITHUB_REF_NAME" \
+              JioFiberCalling.apk \
+              JioFiberCalling.apk.sha256 \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+
+            gh release edit "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "JioFiber Calling $GITHUB_REF_NAME" \
+              --notes "$NOTES"
+
+          else
+            echo "Creating new release..."
+
+            gh release create "$GITHUB_REF_NAME" \
+              JioFiberCalling.apk \
+              JioFiberCalling.apk.sha256 \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "JioFiber Calling $GITHUB_REF_NAME" \
+              --notes "$NOTES"
+          fi
